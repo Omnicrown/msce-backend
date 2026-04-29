@@ -1,17 +1,24 @@
 from flask import Flask, request, jsonify, Response, abort
 from flask_cors import CORS
-from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3, os, time, functools, base64
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+import requests as req
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'msce.db')
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+cloudinary.config(
+    cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME'),
+    api_key    = os.environ.get('CLOUDINARY_API_KEY'),
+    api_secret = os.environ.get('CLOUDINARY_API_SECRET')
+)
 
 ADMIN_USER = 'admin'
 ADMIN_PASS = generate_password_hash('msce@admin2025')
@@ -36,7 +43,8 @@ def init_db():
                 title TEXT NOT NULL,
                 year INTEGER,
                 paper_type TEXT NOT NULL,
-                filename TEXT NOT NULL,
+                cloud_url TEXT NOT NULL,
+                public_id TEXT,
                 filesize INTEGER,
                 uploaded INTEGER DEFAULT (strftime('%s','now')),
                 FOREIGN KEY(subject_id) REFERENCES subjects(id)
@@ -106,12 +114,9 @@ def view_paper(paper_id):
         paper = db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
     if not paper:
         abort(404)
-    filepath = os.path.join(UPLOAD_FOLDER, paper['filename'])
-    if not os.path.exists(filepath):
-        abort(404)
-    with open(filepath, 'rb') as f:
-        data = f.read()
-    response = Response(data, mimetype='application/pdf')
+    url = paper['cloud_url']
+    r = req.get(url, stream=True)
+    response = Response(r.content, mimetype='application/pdf')
     response.headers['Content-Disposition'] = 'inline'
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -135,14 +140,18 @@ def upload_paper():
     paper_type = request.form.get('paper_type', 'past_paper')
     if not subject_id or not title:
         return jsonify({'error': 'subject_id and title required'}), 400
-    filename = secure_filename(str(int(time.time())) + '_' + file.filename)
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(filepath)
-    filesize = os.path.getsize(filepath)
+    result = cloudinary.uploader.upload(
+        file,
+        resource_type='raw',
+        folder='msce_papers',
+        use_filename=True
+    )
+    cloud_url = result['secure_url']
+    public_id = result['public_id']
     with get_db() as db:
         cur = db.execute(
-            "INSERT INTO papers(subject_id,title,year,paper_type,filename,filesize) VALUES(?,?,?,?,?,?)",
-            (subject_id, title, year, paper_type, filename, filesize)
+            "INSERT INTO papers(subject_id,title,year,paper_type,cloud_url,public_id) VALUES(?,?,?,?,?,?)",
+            (subject_id, title, year, paper_type, cloud_url, public_id)
         )
         db.commit()
     return jsonify({'success': True, 'paper_id': cur.lastrowid})
@@ -154,9 +163,10 @@ def delete_paper(paper_id):
         paper = db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
         if not paper:
             abort(404)
-        filepath = os.path.join(UPLOAD_FOLDER, paper['filename'])
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        try:
+            cloudinary.uploader.destroy(paper['public_id'], resource_type='raw')
+        except:
+            pass
         db.execute("DELETE FROM papers WHERE id=?", (paper_id,))
         db.commit()
     return jsonify({'success': True})
