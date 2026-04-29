@@ -5,7 +5,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3, os, time, functools, base64
 
 app = Flask(__name__)
-CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'msce.db')
